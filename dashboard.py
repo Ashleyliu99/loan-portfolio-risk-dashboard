@@ -4,7 +4,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import base64
 
-# ── Page config ───────────────────────────────────────────────
+# ── Page configutation ───────────────────────────────────────────────
 st.set_page_config(
     page_title="Loan Portfolio Risk Dashboard",
     layout="wide",
@@ -261,7 +261,17 @@ trend_df = snapshot[
     (snapshot["region"].isin(selected_region)) &
     (snapshot["product_type"].isin(selected_product))
 ].copy()
+
 trend_df["as_of_month"] = pd.to_datetime(trend_df["as_of_month"])
+
+# 只保留 selected_month 往前 12 个月到 selected_month 本身，共 13 个月
+trend_end = pd.to_datetime(selected_month)
+trend_start = trend_end - pd.DateOffset(months=12)
+
+trend_df = trend_df[
+    (trend_df["as_of_month"] >= trend_start) &
+    (trend_df["as_of_month"] <= trend_end)
+].copy()
 
 monthly_trend = trend_df.groupby("as_of_month").apply(
     lambda x: pd.Series({
@@ -295,13 +305,26 @@ fig.update_traces(
     line=dict(width=2.5), marker=dict(size=6),
     hovertemplate="%{fullData.name}<br>%{x|%b %Y}<br>%{y:.2%}<extra></extra>"
 )
+
+tick_dates = sorted(monthly_trend["as_of_month"].unique())
+tick_dates_show = tick_dates[::2]
+
+if tick_dates[-1] not in tick_dates_show:
+    tick_dates_show.append(tick_dates[-1])
+
 fig.update_layout(
     height=340,
     margin=dict(l=0, r=10, t=10, b=10),
     paper_bgcolor="white", plot_bgcolor="white",
     font=dict(size=12, color="#374151"),
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0, title=None),
-    xaxis=dict(title="Reporting Month", showgrid=False, tickformat="%b %Y", tickfont=dict(size=11)),
+    xaxis=dict(
+    title="Reporting Month",
+    showgrid=False,
+    tickfont=dict(size=11),
+    tickmode="array",
+    tickvals=tick_dates_show,
+    ticktext=[pd.to_datetime(d).strftime("%b %Y") for d in tick_dates_show]),
     yaxis=dict(title="Rate", tickformat=".1%", showgrid=True, gridcolor="#F0F4F8", zeroline=False, range=[0, 0.045])
 )
 
@@ -310,6 +333,7 @@ roll_df = snapshot[
     (snapshot["region"].isin(selected_region)) &
     (snapshot["product_type"].isin(selected_product))
 ].copy()
+
 roll_df["as_of_month"] = pd.to_datetime(roll_df["as_of_month"])
 
 roll_df["delq_bucket"] = pd.cut(
@@ -317,29 +341,88 @@ roll_df["delq_bucket"] = pd.cut(
     bins=[-1, 29, 59, 89, float("inf")],
     labels=["Current", "30-59", "60-89", "90+"]
 )
+
 roll_df = roll_df.sort_values(["loan_id", "as_of_month"])
-roll_df["next_delq_bucket"] = roll_df.groupby("loan_id")["delq_bucket"].shift(-1)
-roll_df = roll_df.dropna(subset=["delq_bucket", "next_delq_bucket"])
+
+# 上一条记录的 bucket 和月份
+roll_df["prev_delq_bucket"] = roll_df.groupby("loan_id")["delq_bucket"].shift(1)
+roll_df["prev_as_of_month"] = roll_df.groupby("loan_id")["as_of_month"].shift(1)
+
+# 计算上一条记录与当前记录之间是否正好相差 1 个月
+roll_df["month_diff"] = (
+    (roll_df["as_of_month"].dt.year - roll_df["prev_as_of_month"].dt.year) * 12 +
+    (roll_df["as_of_month"].dt.month - roll_df["prev_as_of_month"].dt.month)
+)
+
+# 只保留：
+# 1) 当前是 selected_month
+# 2) 存在 previous month bucket
+# 3) previous record 与 current record 正好相差 1 个月
+roll_month = roll_df[
+    (roll_df["as_of_month"] == pd.to_datetime(selected_month)) &
+    (roll_df["prev_delq_bucket"].notna()) &
+    (roll_df["month_diff"] == 1)
+].copy()
 
 bucket_order = ["Current", "30-59", "60-89", "90+"]
-migration_matrix = pd.crosstab(
-    roll_df["delq_bucket"], roll_df["next_delq_bucket"], normalize="index"
-).reindex(index=bucket_order, columns=bucket_order, fill_value=0)
 
-fig_roll = px.imshow(
-    migration_matrix, text_auto=".1%", aspect="equal",
-    color_continuous_scale=[[0, "#EFF6FF"], [0.5, "#3B82F6"], [1, "#1E3A5F"]]
-)
-fig_roll.update_traces(
-    hovertemplate="Current: %{y}<br>Next: %{x}<br>Rate: %{z:.2%}<extra></extra>"
-)
+if roll_month.empty:
+    fig_roll = px.imshow(
+        pd.DataFrame(0, index=bucket_order, columns=bucket_order),
+        text_auto=".1%",
+        aspect="equal",
+        color_continuous_scale=[[0, "#EFF6FF"], [0.5, "#3B82F6"], [1, "#1E3A5F"]]
+    )
+
+    fig_roll.update_layout(
+        height=340,
+        margin=dict(l=10, r=10, t=10, b=10),
+        paper_bgcolor="white",
+        plot_bgcolor="white",
+        font=dict(size=12, color="#374151"),
+        xaxis=dict(title="Current Month Bucket", side="bottom"),
+        yaxis=dict(title="Previous Month Bucket"),
+        coloraxis_colorbar=dict(title="Rate", thickness=14, len=0.78)
+    )
+else:
+    migration_matrix = pd.crosstab(
+        roll_month["prev_delq_bucket"],
+        roll_month["delq_bucket"],
+        normalize="index"
+    ).reindex(index=bucket_order, columns=bucket_order, fill_value=0)
+
+    fig_roll = px.imshow(
+        migration_matrix,
+        text_auto=".1%",
+        aspect="equal",
+        color_continuous_scale=[[0, "#EFF6FF"], [0.5, "#3B82F6"], [1, "#1E3A5F"]]
+    )
+
+    fig_roll.update_traces(
+        hovertemplate="Previous: %{y}<br>Current: %{x}<br>Rate: %{z:.2%}<extra></extra>"
+    )
+
+    fig_roll.update_layout(
+        height=340,
+        margin=dict(l=10, r=10, t=10, b=10),
+        paper_bgcolor="white",
+        plot_bgcolor="white",
+        font=dict(size=12, color="#374151"),
+        xaxis=dict(title="Current Month Bucket", side="bottom"),
+        yaxis=dict(title="Previous Month Bucket"),
+        coloraxis_colorbar=dict(title="Rate",tickformat=".0%",thickness=14, len=0.78)
+    )
+
+
+
+
 fig_roll.update_layout(
     height=340,
     margin=dict(l=10, r=10, t=10, b=10),
     paper_bgcolor="white", plot_bgcolor="white",
     font=dict(size=12, color="#374151"),
-    xaxis=dict(title="Next Month Bucket", side="bottom"),
-    yaxis=dict(title="Current Month Bucket"),
+    xaxis=dict(title="Current Month Bucket", side="bottom"),
+    yaxis=dict(title="Previous Month Bucket"),
     coloraxis_colorbar=dict(title="Rate", thickness=14, len=0.78)
 )
 
@@ -363,7 +446,7 @@ csv = watchlist.to_csv(index=False).encode("utf-8")
 csv_b64 = base64.b64encode(csv).decode()
 st.markdown(f"""
 <div style="display:flex; justify-content:center; align-items:center; gap:1rem; margin-bottom:0.5rem;">
-    <p class="watchlist-heading" style="margin:0;">Top 10 Loans by Default Rate</p>
+    <p class="watchlist-heading" style="margin:0;">Top 10 Loans by Expected Loss</p>
     <a href="data:text/csv;base64,{csv_b64}" download="watchlist_top10.csv"
        style="background:#1E3A5F; color:white; padding:0.4rem 1rem; border-radius:6px;
               font-weight:600; font-size:0.83rem; text-decoration:none; white-space:nowrap;">

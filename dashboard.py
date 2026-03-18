@@ -181,9 +181,14 @@ snapshot["as_of_month"] = pd.to_datetime(snapshot["as_of_month"])
 st.sidebar.markdown("## Filters")
 st.sidebar.markdown("---")
 
+month_options = sorted(snapshot["as_of_month"].dt.strftime("%Y-%m-%d").dropna().unique())
+default_month = "2025-10-31"
+default_index = month_options.index(default_month) if default_month in month_options else len(month_options) - 1
+
 selected_month = st.sidebar.selectbox(
     "Reporting Month",
-    sorted(snapshot["as_of_month"].dt.strftime("%Y-%m-%d").dropna().unique())
+    options=month_options,
+    index=default_index
 )
 
 selected_region = st.sidebar.multiselect(
